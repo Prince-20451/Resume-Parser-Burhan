@@ -3,6 +3,9 @@
   "version": "1.0.0",
   "private": true,
   "main": "server.js",
+  "engines": {
+    "node": ">=22.13.0"
+  },
   "scripts": {
     "start": "node --disable-warning=ExperimentalWarning server.js",
     "dev": "nodemon"

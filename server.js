@@ -12,13 +12,16 @@ const { DatabaseSync } = require("node:sqlite"); // built-in, no native build ne
 
 if (fs.existsSync(path.join(__dirname, ".env"))) process.loadEnvFile(path.join(__dirname, ".env"));
 
-const UPLOADS = process.env.UPLOAD_DIR || path.join(__dirname, "uploads");
+// On a host with a persistent disk (e.g. Render), set DATA_DIR to the mount path (like /var/data)
+const DATA_DIR = process.env.DATA_DIR || __dirname;
+fs.mkdirSync(DATA_DIR, { recursive: true });
+const UPLOADS = process.env.UPLOAD_DIR || path.join(DATA_DIR, "uploads");
 fs.mkdirSync(UPLOADS, { recursive: true });
 const ALLOWED = [".pdf", ".docx", ".txt"];
 const PER_PAGE = 25;
 
 /* ------------------------------ Database ------------------------------ */
-const db = new DatabaseSync(process.env.DB_PATH || path.join(__dirname, "resumes.db"));
+const db = new DatabaseSync(process.env.DB_PATH || path.join(DATA_DIR, "resumes.db"));
 db.exec(`
 CREATE TABLE IF NOT EXISTS resumes(
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -395,6 +398,21 @@ const upload = multer({
 
 const app = express();
 
+// run fn over items with at most `limit` in flight; results keep the input order
+async function mapLimit(items, limit, fn) {
+  const out = new Array(items.length);
+  let next = 0;
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, async () => {
+    while (next < items.length) {
+      const i = next++;
+      out[i] = await fn(items[i]);
+    }
+  }));
+  return out;
+}
+
+app.get("/healthz", (_, res) => res.type("text").send("ok")); // health check / uptime ping, no DB or Zoho call
+
 function todayStats() {
   return db.prepare("SELECT COALESCE(SUM(status='PASS'),0) p, COALESCE(SUM(status='FAIL'),0) f FROM resumes WHERE date(uploaded_at)=?")
     .get(now().slice(0, 10));
@@ -420,14 +438,12 @@ app.post("/upload", upload.array("resumes"), async (req, res) => {
 
   const insert = db.prepare(`INSERT INTO resumes(uploaded_at,filename,stored_path,name,email,phone,skills,experience,
     status,reason,zoho_id,zoho_status,position,score,matched,missing) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`);
-  const results = [];
-
-  for (const f of files) {
+  // 3 resumes at a time: much faster than one by one, without flooding Zoho's API
+  const results = await mapLimit(files, 3, async (f) => {
     const filename = Buffer.from(f.originalname, "latin1").toString("utf8"); // fix multer filename encoding
     if (!ALLOWED.includes(path.extname(filename).toLowerCase())) {
       fs.rmSync(f.path, { force: true });
-      results.push({ filename, name: null, email: null, score: null, status: "FAIL", reason: "Unsupported file type", matched: [], missing: [] });
-      continue;
+      return { filename, name: null, email: null, score: null, status: "FAIL", reason: "Unsupported file type", matched: [], missing: [] };
     }
     let info, r;
     try {
@@ -454,8 +470,8 @@ app.post("/upload", upload.array("resumes"), async (req, res) => {
     const reason = r.reasons.join("; ");
     insert.run(now(), filename, f.path, info.name, info.email, info.phone, info.skills.join(", "), info.experienceYears,
       status, reason, zid, zstat, title, r.score, r.matched.join(", "), r.missing.join(", "));
-    results.push({ filename, name: info.name, email: info.email, score: r.score, status, reason, zoho: zstat, matched: r.matched, missing: r.missing });
-  }
+    return { filename, name: info.name, email: info.email, score: r.score, status, reason, zoho: zstat, matched: r.matched, missing: r.missing };
+  });
   res.send(resultPage({ results, keywords, title, threshold }));
 });
 
@@ -501,7 +517,10 @@ app.get("/settings", (_, res) => res.redirect("/")); // old bookmark
 
 if (require.main === module) {
   const PORT = process.env.PORT || 5000;
-  app.listen(PORT, () => console.log(`Resume Screener: http://localhost:${PORT}`));
+  const server = app.listen(PORT, "0.0.0.0", () => console.log(`Resume Screener: http://localhost:${PORT}`));
+  // longer than the hosting proxy's keep-alive, otherwise it can drop connections with 502s
+  server.keepAliveTimeout = 120000;
+  server.headersTimeout = 125000;
 
   // Renew the Zoho access token on a schedule (default every 40 min; it expires after 60 min).
   // The refresh token itself never expires, so only the access token is regenerated.
