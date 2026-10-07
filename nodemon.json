@@ -1,0 +1,6 @@
+{
+  "watch": ["server.js", ".env"],
+  "ext": "js,json",
+  "ignore": ["uploads", "resumes.db*", "node_modules"],
+  "exec": "node --disable-warning=ExperimentalWarning server.js"
+}

@@ -1,0 +1,15 @@
+# dependencies
+node_modules/
+
+# secrets
+.env
+
+# candidate data (personal information)
+uploads/
+resumes.db
+resumes.db-*
+
+# logs / OS
+*.log
+.DS_Store
+Thumbs.db
